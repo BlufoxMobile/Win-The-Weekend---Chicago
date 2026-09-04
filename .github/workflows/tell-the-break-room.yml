@@ -1,0 +1,188 @@
+# =============================================================================
+# Win-The-Weekend deck  →  the Cook County Cooks break-room wall
+# -----------------------------------------------------------------------------
+# WHERE THIS FILE GOES
+#   .github/workflows/tell-the-break-room.yml
+#   in BOTH deck repositories:
+#     · BlufoxMobile/Win-The-Weekend---Chicago
+#     · BlufoxMobile/Win-The-Weekend---Big-South
+#   The two copies are identical on purpose — there is nothing to get wrong when
+#   installing it, and the site works out which deck rang from the message.
+#
+# WHAT THIS IS
+#   The break-room wall at cookcountycooks.com shows the Head Chef of the Week
+#   for each district, and it reads those names out of THIS deck. Until now it
+#   found out by re-reading the deck on a timer, which meant a deck posted at
+#   8:55 could sit unseen until 9:39. On Friday 4 September 2026 the Chicago
+#   deck sat unread for over an hour while Big South, posted earlier, went up
+#   straight away — which to anyone looking at the wall reads as "Big South
+#   works, Chicago is broken".
+#
+#   This file removes the wait. When the deck is pushed, it rings a bell at the
+#   site's repository and the site re-reads the deck within a minute or two.
+#
+# WHAT IT CANNOT DO
+#   It does not read the deck, does not touch the wall, and cannot break either
+#   of them. The site still re-reads on its own timer no matter what happens
+#   here. If this file is deleted, or the key below is never made, the ONLY
+#   consequence is that the wall goes back to being up to half an hour behind.
+#
+# THE KEY
+#   The site lives in a different GitHub account, so ringing its bell needs a
+#   key: a repository secret on THIS repository called BREAK_ROOM_TOKEN.
+#
+#   UNTIL THAT SECRET EXISTS THIS WORKFLOW GOES GREEN AND DOES NOTHING. That is
+#   deliberate. Jeff pushes this deck himself every Friday morning, and a red X
+#   emailed to him about his own push, every week, for a key he has not made
+#   yet, would be worse than useless — he would learn to ignore the mail, and
+#   then the mail would be worthless on the day it matters. So a missing key is
+#   a NOTICE on a green run, and nothing more.
+#
+#   Once the key DOES exist and stops working — expired, revoked, mistyped —
+#   this goes loudly red, because at that point silence would be a lie: he would
+#   believe the wall is following his pushes when it is not. The message on the
+#   red run says exactly which secret, exactly what to do, and that the wall is
+#   still catching up on its own in the meantime so nothing is on fire.
+# =============================================================================
+
+name: Tell the break room
+
+on:
+  # Any push to the deck's default branch. Deliberately NOT filtered by file
+  # path: a path filter that silently stops matching (a rename, a moved file, a
+  # new build output) fails quietly, and quiet failure is the exact thing being
+  # designed out here. The site end is cheap and does nothing at all when the
+  # deck's chef slides have not changed, so an unnecessary ping costs nothing.
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# This job needs NOTHING from its own repository — it does not check the deck
+# out, does not read it, does not write to it. Everything it can do, it does
+# with the key below. If anybody ever adds a checkout step here, they will need
+# to put `contents: read` back.
+permissions: {}
+
+# If two pushes land in quick succession, only the newer bell matters: the site
+# re-reads the whole deck either way, so ringing twice about the same deck is
+# pure noise. Cancelling here is safe precisely because this job writes nothing.
+concurrency:
+  group: tell-the-break-room-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ring:
+    name: Ring the bell
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      # ---------------------------------------------------------------------
+      # Nothing here ever prints the key. GitHub also masks secrets in logs,
+      # but the safe habit is not to hand it to anything that echoes.
+      # ---------------------------------------------------------------------
+      - name: Is the key in place?
+        id: key
+        env:
+          BREAK_ROOM_TOKEN: ${{ secrets.BREAK_ROOM_TOKEN }}
+        run: |
+          set -u
+          set -o pipefail
+
+          # A secret that was never created arrives as an empty string, and one
+          # that was pasted with a stray newline arrives as whitespace. Both
+          # count as "not set". This strips whitespace WITHOUT printing anything.
+          if [ -n "$(printf '%s' "${BREAK_ROOM_TOKEN:-}" | tr -d '[:space:]')" ]; then
+            echo "have_key=true" >> "$GITHUB_OUTPUT"
+            echo "The BREAK_ROOM_TOKEN secret is set on this repository."
+            exit 0
+          fi
+
+          echo "have_key=false" >> "$GITHUB_OUTPUT"
+          echo "::notice::Skipped: this repository has no BREAK_ROOM_TOKEN secret, so the break-room wall was not told about this push. Nothing is broken — the wall re-reads this deck on its own timer and will catch up within about half an hour. To make it instant, add the secret: this repo -> Settings -> Secrets and variables -> Actions -> New repository secret -> name it exactly BREAK_ROOM_TOKEN."
+          {
+            echo "### The break room was not told — and that is fine"
+            echo ""
+            echo "This repository has no **BREAK_ROOM_TOKEN** secret yet, so this workflow did nothing."
+            echo ""
+            echo "**Is anything broken?** No. The chef wall at cookcountycooks.com re-reads this"
+            echo "deck on its own timer and will pick up this push within about half an hour."
+            echo "This workflow only makes that instant."
+            echo ""
+            echo "**To make it instant:** Settings → Secrets and variables → Actions →"
+            echo "**New repository secret** → name it exactly \`BREAK_ROOM_TOKEN\` → paste the key."
+            echo "Making the key is written out step by step in the site repository's DEPLOY-NOTES."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Ring the bell
+        if: steps.key.outputs.have_key == 'true'
+        env:
+          # A token with `Contents: Read and write` on the SITE repository only.
+          BREAK_ROOM_TOKEN: ${{ secrets.BREAK_ROOM_TOKEN }}
+          SITE_REPO: projectknoxsolutions/Cook-County-Cooks-Site
+          DECK: ${{ github.repository }}
+        run: |
+          # -e off on purpose: a curl that cannot reach GitHub must produce the
+          # plain-English message below, not a bare non-zero exit nobody can read.
+          set +e
+          set -u
+          set -o pipefail
+
+          # `client_payload` is capped at 10 top-level properties and 65,535
+          # characters; three short strings is well inside that. Built with jq
+          # rather than string-stuffing so the values are always valid JSON.
+          # They exist only so the site's run summary can say which deck woke it,
+          # and so the site can wait for GitHub's file cache to catch up with
+          # this exact commit before it re-reads the deck.
+          PAYLOAD=$(jq -nc \
+            --arg deck "$DECK" \
+            --arg sha "$GITHUB_SHA" \
+            --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{event_type: "deck-updated", client_payload: {deck: $deck, sha: $sha, pushed_at: $at}}')
+
+          CODE=$(curl -sS --max-time 30 \
+            -o "$RUNNER_TEMP/dispatch.txt" -w '%{http_code}' \
+            -X POST "https://api.github.com/repos/$SITE_REPO/dispatches" \
+            -H 'accept: application/vnd.github+json' \
+            -H 'x-github-api-version: 2022-11-28' \
+            -H "authorization: Bearer $BREAK_ROOM_TOKEN" \
+            -d "$PAYLOAD")
+
+          echo "GitHub answered HTTP ${CODE:-(no answer)}"
+
+          # Every message below is written for somebody who is not a developer,
+          # reading it in an email, on a Friday morning, about their own push.
+          # Each one says the same three things: what went wrong, that the wall
+          # is still catching up on its own, and exactly what to do about it.
+          case "${CODE:-000}" in
+            204)
+              echo "Rung. The wall has been told this deck changed."
+              {
+                echo "### The break room has been told"
+                echo ""
+                echo "The chef wall at cookcountycooks.com has been asked to re-read this deck"
+                echo "and will show any new head chefs within a minute or two."
+              } >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            401)
+              echo "::error::The BREAK_ROOM_TOKEN secret on this repository is expired, revoked, or was pasted in wrong, so the break-room wall was NOT told about this push. Nothing is on fire: the wall re-reads this deck on its own timer and will catch up within about half an hour. But until a new key is made, every deck post will be up to half an hour late. Make a new key and replace the BREAK_ROOM_TOKEN secret — the steps are in the site repository's DEPLOY-NOTES."
+              exit 1
+              ;;
+            403)
+              echo "::error::The BREAK_ROOM_TOKEN secret exists but GitHub will not let it do this. That usually means the key was made without 'Contents: Read and write', or against the wrong account, or an organisation owner has not approved it yet. The wall will still catch up on its own within about half an hour. Remake the key and replace the BREAK_ROOM_TOKEN secret — the steps are in the site repository's DEPLOY-NOTES."
+              exit 1
+              ;;
+            404)
+              echo "::error::GitHub says it cannot find $SITE_REPO. With a key in hand that almost always means the same thing as 'not allowed' — the key cannot see that repository, so GitHub behaves as though it does not exist. Check the key was made with the site repository ticked under 'Only select repositories', then replace the BREAK_ROOM_TOKEN secret. The wall will still catch up on its own within about half an hour."
+              exit 1
+              ;;
+            000)
+              echo "::error::Could not reach GitHub at all to tell the break-room wall about this push, so it was not told. This is usually a passing GitHub or network problem rather than anything wrong with this repository. The wall will still catch up on its own within about half an hour. If it happens on two pushes in a row, check the BREAK_ROOM_TOKEN secret."
+              exit 1
+              ;;
+            *)
+              echo "::error::GitHub gave an unexpected answer (HTTP $CODE) when telling the break-room wall about this push, so it may not have been told. The wall will still catch up on its own within about half an hour. GitHub's full reply is printed below; if it mentions the token, replace the BREAK_ROOM_TOKEN secret using the steps in the site repository's DEPLOY-NOTES."
+              cat "$RUNNER_TEMP/dispatch.txt" 2>/dev/null || true
+              exit 1
+              ;;
+          esac
